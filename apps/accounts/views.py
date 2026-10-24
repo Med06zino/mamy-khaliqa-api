@@ -70,8 +70,16 @@ class MeView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
-class ChangePasswordView(APIView):
+class ChangePasswordView(ScopedAPIView):
+    """Changement de mot de passe pour un utilisateur connecté.
+
+    Throttle "change_password" (5/hour) pour limiter le brute-force
+    du mot de passe actuel par un attaquant ayant accès à la session.
+    Le re-login() après set_password maintient la session valide.
+    """
+
     permission_classes = [IsAuthenticated]
+    throttle_scope = "change_password"
 
     def post(self, request):
         s = ChangePasswordSerializer(data=request.data, context={"request": request})

@@ -50,13 +50,17 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="best-sellers")
     def best_sellers(self, request):
-        """Meilleures ventes calculees a partir des commandes non annulees. Vide s'il n'y a aucune vente.
+        """Meilleures ventes calculées à partir des commandes réelles non annulées.
 
-        On construit un queryset propre (sans with_availability) pour eviter les conflits
-        entre les annotations Count/Sum de with_availability et le Sum sur orderitem__quantity.
-        La disponibilite est ensuite calculee via la property Python, ce qui est acceptable
-        car le nombre de best-sellers est limite a 8.
+        Logique métier :
+        1. Si des produits ont été vendus → liste les 8 plus vendus (vrais best-sellers).
+        2. Si aucune vente encore → retourne les produits is_featured=True (mis en avant par l'admin).
+        3. Si aucun produit is_featured non plus → retourne les 8 plus récents (fallback ultime).
+
+        Dans les cas 2 et 3, le frontend n'affiche PAS le titre "Meilleures ventes"
+        (il utilise le flag `is_fallback` dans la réponse pour adapter le libellé).
         """
+        # -- Étape 1 : vraies meilleures ventes --
         base_qs = (
             Product.objects.public()
             .select_related("category")
@@ -66,19 +70,47 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
             .filter(sold__gt=0)
             .order_by("-sold")[:8]
         )
-        # Re-annoter avec with_availability pour que le serializer puisse utiliser obj.avail.
         pks = [p.pk for p in base_qs]
-        if not pks:
-            return Response([])
-        qs = with_availability(
+
+        if pks:
+            qs = with_availability(
+                Product.objects.public()
+                .select_related("category")
+                .prefetch_related("images", "variants")
+                .filter(pk__in=pks)
+                .annotate(sold=Sum("orderitem__quantity"))
+                .exclude(orderitem__order__status="cancelled")
+            ).order_by("-sold")
+            return Response({
+                "is_fallback": False,
+                "results": ProductListSerializer(qs, many=True, context=self.get_serializer_context()).data,
+            })
+
+        # -- Étape 2 : produits mis en avant par l'admin --
+        featured_qs = with_availability(
+            Product.objects.public()
+            .filter(is_featured=True)
+            .select_related("category")
+            .prefetch_related("images", "variants")
+            .order_by("?")  # ordre aléatoire pour varier l'affichage
+        )[:8]
+        if featured_qs.exists():
+            return Response({
+                "is_fallback": True,
+                "results": ProductListSerializer(featured_qs, many=True, context=self.get_serializer_context()).data,
+            })
+
+        # -- Étape 3 : fallback ultime → 8 plus récents --
+        recent_qs = with_availability(
             Product.objects.public()
             .select_related("category")
             .prefetch_related("images", "variants")
-            .filter(pk__in=pks)
-            .annotate(sold=Sum("orderitem__quantity"))
-            .exclude(orderitem__order__status="cancelled")
-        ).order_by("-sold")
-        return Response(ProductListSerializer(qs, many=True, context=self.get_serializer_context()).data)
+            .order_by("-created_at")
+        )[:8]
+        return Response({
+            "is_fallback": True,
+            "results": ProductListSerializer(recent_qs, many=True, context=self.get_serializer_context()).data,
+        })
 
 
 # ---------------- Admin ----------------
@@ -103,7 +135,7 @@ class AdminProductViewSet(viewsets.ModelViewSet):
     serializer_class = AdminProductSerializer
     permission_classes = [IsStaffUser]
     search_fields = ["name", "sku"]
-    filterset_fields = ["category", "is_published", "is_archived"]
+    filterset_fields = ["category", "is_published", "is_featured", "is_archived"]
     ordering_fields = ["created_at", "price", "name"]
 
     def get_queryset(self):

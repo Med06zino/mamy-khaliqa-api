@@ -91,7 +91,8 @@ class OrderTests(TestCase):
     def test_best_sellers_from_real_orders(self):
         client_for().post("/api/v1/orders/", order_payload(self.p, self.zone, qty=2), format="json")
         r = client_for().get("/api/v1/products/best-sellers/").json()
-        self.assertEqual([x["name"] for x in r], ["Gloss Rose"])
+        self.assertFalse(r["is_fallback"])
+        self.assertEqual([x["name"] for x in r["results"]], ["Gloss Rose"])
 
 
 class ReviewTests(TestCase):

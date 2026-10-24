@@ -61,9 +61,13 @@ class Product(models.Model):
     ingredients = models.TextField("Composition (fournie par la marque)", blank=True)
     usage_tips = models.TextField("Conseils d'utilisation valides", blank=True)
     precautions = models.TextField("Precautions", blank=True)
+    is_featured  = models.BooleanField(
+        "Mis en avant", default=False,
+        help_text="Apparaît en page d'accueil si aucune vente réelle n'existe encore."
+    )
     is_published = models.BooleanField(default=False)
-    is_archived = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
+    is_archived  = models.BooleanField(default=False)
+    created_at   = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = ProductQuerySet.as_manager()

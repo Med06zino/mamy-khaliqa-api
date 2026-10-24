@@ -45,6 +45,8 @@ INSTALLED_APPS = [
     "apps.reviews",
     "apps.contact",
     "apps.store_settings",
+    "apps.banners",
+    "apps.newsletter",
 ]
 
 MIDDLEWARE = [
@@ -127,8 +129,10 @@ REST_FRAMEWORK = {
         "login": "10/min",
         "register": "10/hour",
         "password_reset": "5/hour",
+        "change_password": "5/hour",
         "contact": "10/hour",
         "orders": "30/hour",
+        "newsletter": "5/hour",
     },
 }
 SPECTACULAR_SETTINGS = {

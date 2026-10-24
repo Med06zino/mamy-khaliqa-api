@@ -58,7 +58,8 @@ class ProductListSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             "id", "name", "slug", "sku", "price", "compare_at_price", "volume", "short_description",
-            "category", "main_image", "available_stock", "stock_status", "has_variants", "created_at",
+            "category", "main_image", "available_stock", "stock_status", "has_variants",
+            "is_featured", "created_at",
         ]
 
     def _threshold(self):
@@ -159,7 +160,7 @@ class AdminProductSerializer(serializers.ModelSerializer):
         fields = [
             "id", "category", "category_name", "name", "slug", "sku", "short_description", "description",
             "price", "compare_at_price", "stock", "available_stock", "volume", "ingredients", "usage_tips",
-            "precautions", "is_published", "is_archived", "created_at", "images", "variants",
+            "precautions", "is_published", "is_featured", "is_archived", "created_at", "images", "variants",
         ]
         read_only_fields = ["slug", "created_at"]
 
