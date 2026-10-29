@@ -114,10 +114,18 @@ def create_saspay_checkout_session(order):
         SasPayCheckoutSession: La session créée avec checkout_url
 
     Raises:
-        ValidationError: Si l'appel API échoue
+        ValidationError: Si l'appel API échoue ou si SasPay n'est pas configuré
     """
-    api_url = f"{settings.SASPAY_BASE_URL}/checkout-sessions/"
     api_key = settings.SASPAY_API_KEY
+
+    # Vérifier que SasPay est configuré
+    if not api_key or api_key == "sk_test_placeholder":
+        logger.warning(f"SasPay not configured (placeholder key). Order {order.number}")
+        raise ValidationError(
+            {"saspay": "Le paiement en ligne SasPay n'est pas configuré. Veuillez contacter l'administrateur ou choisir un autre mode de paiement."}
+        )
+
+    api_url = f"{settings.SASPAY_BASE_URL}/checkout-sessions/"
 
     headers = {
         "Authorization": f"Bearer {api_key}",

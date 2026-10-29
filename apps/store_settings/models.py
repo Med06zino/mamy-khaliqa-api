@@ -41,6 +41,11 @@ class StoreSettings(models.Model):
         "Procedure si la zone n'est pas configuree",
         default="Les frais de livraison seront confirmes avec vous par la boutique avant l'expedition.",
     )
+    store_pickup_enabled = models.BooleanField(
+        "Retrait en boutique",
+        default=False,
+        help_text="Permet aux clients de choisir le retrait en boutique (aucuns frais de livraison).",
+    )
 
     class Meta:
         verbose_name = "Parametres de la boutique"
