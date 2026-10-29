@@ -40,6 +40,22 @@ class CategoryAdmin(admin.ModelAdmin):
     ordering      = ["position", "name"]
     prepopulated_fields = {}   # slug auto-généré par le modèle, on laisse Django faire
 
+    def has_add_permission(self, request):
+        """Empêche la création de nouvelles catégories"""
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        """Empêche la suppression des catégories principales"""
+        if obj and obj.slug in ["khaliqa-beauty", "khaliqa-hair"]:
+            return False
+        return True
+
+    def get_readonly_fields(self, request, obj=None):
+        """Rend le slug readonly pour les catégories principales"""
+        if obj and obj.slug in ["khaliqa-beauty", "khaliqa-hair"]:
+            return ["slug", "name"]
+        return []
+
     def product_count_display(self, obj):
         return Product.objects.filter(category=obj, is_published=True, is_archived=False).count()
     product_count_display.short_description = "Produits publiés"
