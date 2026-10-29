@@ -5,7 +5,9 @@ from .models import StoreSettings
 PUBLIC_FIELDS = [
     "name", "tagline", "logo", "contact_email", "contact_phone", "address", "whatsapp_number",
     "instagram_url", "facebook_url", "tiktok_url", "announcement_text", "announcement_active",
-    "footer_text", "guest_checkout_enabled", "payment_cash_on_delivery", "unknown_zone_policy",
+    "footer_text", "guest_checkout_enabled",
+    "payment_cash_on_delivery", "payment_wave_enabled", "payment_orange_money_enabled",
+    "unknown_zone_policy",
 ]
 
 

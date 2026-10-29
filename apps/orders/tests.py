@@ -95,6 +95,127 @@ class OrderTests(TestCase):
         self.assertEqual([x["name"] for x in r["results"]], ["Gloss Rose"])
 
 
+class PaymentTests(TestCase):
+    """Tests des règles métier liées aux paiements et remboursements."""
+
+    def setUp(self):
+        self.cat, self.p, self.zone = make_catalog()
+
+    def _create_order(self, **extra):
+        """Crée une commande et retourne son numéro."""
+        return client_for().post(
+            "/api/v1/orders/",
+            order_payload(self.p, self.zone, **extra),
+            format="json",
+        ).json()["number"]
+
+    def _advance_to(self, staff_client, num, *statuses):
+        """Fait avancer une commande à travers une liste de statuts."""
+        for st in statuses:
+            r = staff_client.patch(
+                f"/api/v1/admin/orders/{num}/update/",
+                {"status": st},
+                format="json",
+            )
+            self.assertEqual(r.status_code, 200, f"Transition vers '{st}' échouée : {r.json()}")
+
+    # ── payment_method tracé à la création ──────────────────────
+
+    def test_payment_method_stored_on_create(self):
+        """payment_method=cash_on_delivery est stocké et renvoyé dans la réponse."""
+        data = order_payload(self.p, self.zone)
+        data["payment_method"] = "cash_on_delivery"
+        r = client_for().post("/api/v1/orders/", data, format="json")
+        self.assertEqual(r.status_code, 201)
+        j = r.json()
+        self.assertEqual(j["payment_method"], "cash_on_delivery")
+        self.assertEqual(j["payment_method_label"], "Paiement à la livraison")
+
+    def test_payment_method_empty_by_default(self):
+        """Sans payment_method explicite, le champ est vide et le label générique."""
+        j = client_for().post(
+            "/api/v1/orders/", order_payload(self.p, self.zone), format="json"
+        ).json()
+        self.assertEqual(j["payment_method"], "")
+        self.assertEqual(j["payment_method_label"], "Non précisée")
+
+    def test_payment_method_does_not_affect_payment_status(self):
+        """Envoyer cash_on_delivery ne marque PAS la commande comme payée automatiquement."""
+        data = order_payload(self.p, self.zone)
+        data["payment_method"] = "cash_on_delivery"
+        j = client_for().post("/api/v1/orders/", data, format="json").json()
+        self.assertEqual(j["payment_status"], "unpaid")
+
+    # ── Règles de marquage paid / refunded ──────────────────────
+
+    def test_admin_can_mark_paid(self):
+        """L'admin peut marquer une commande comme payée."""
+        num = self._create_order()
+        s = client_for(make_staff())
+        r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["payment_status"], "paid")
+
+    def test_cannot_mark_paid_a_cancelled_order(self):
+        """On ne peut pas marquer payée une commande annulée."""
+        u = make_user()
+        num = client_for(u).post(
+            "/api/v1/orders/", order_payload(self.p, self.zone), format="json"
+        ).json()["number"]
+        client_for(u).post(f"/api/v1/orders/{num}/cancel/")
+        s = client_for(make_staff())
+        r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_admin_can_refund_a_paid_order(self):
+        """L'admin peut rembourser une commande déjà payée."""
+        num = self._create_order()
+        s = client_for(make_staff())
+        s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"}, format="json")
+        r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "refunded"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["payment_status"], "refunded")
+
+    def test_cannot_refund_an_unpaid_order(self):
+        """On ne peut pas rembourser une commande qui n'a pas encore été payée."""
+        num = self._create_order()
+        s = client_for(make_staff())
+        r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "refunded"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("payment_status", r.json().get("errors", {}))
+
+    def test_refunded_order_excluded_from_revenue(self):
+        """Une commande remboursée n'est pas comptée dans le CA."""
+        num = self._create_order()
+        s = client_for(make_staff())
+        # Payer puis rembourser
+        s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"},     format="json")
+        s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "refunded"}, format="json")
+        dash = s.get("/api/v1/admin/dashboard/").json()
+        # Le CA ne doit pas inclure cette commande remboursée
+        self.assertEqual(dash["revenue_collected"], 0)
+
+    def test_client_cannot_modify_payment_status(self):
+        """Un client ne peut pas modifier le statut de paiement de sa commande."""
+        u = make_user()
+        c = client_for(u)
+        num = c.post("/api/v1/orders/", order_payload(self.p, self.zone), format="json").json()["number"]
+        # La route /orders/<number>/update/ n'existe pas côté client — on vérifie le 404/405
+        r = c.patch(f"/api/v1/orders/{num}/update/", {"payment_status": "paid"}, format="json")
+        self.assertIn(r.status_code, [404, 405])
+
+    def test_order_response_contains_payment_method_label(self):
+        """La réponse de la liste commandes contient payment_method."""
+        u = make_user()
+        c = client_for(u)
+        data = order_payload(self.p, self.zone)
+        data["payment_method"] = "cash_on_delivery"
+        c.post("/api/v1/orders/", data, format="json")
+        results = c.get("/api/v1/orders/").json()["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["payment_method"], "cash_on_delivery")
+
+
 class ReviewTests(TestCase):
     def test_only_verified_buyers_and_moderation(self):
         _, p, zone = make_catalog()

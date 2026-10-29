@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "apps.catalog",
     "apps.deliveries",
     "apps.orders",
+    "apps.payments",
     "apps.reviews",
     "apps.contact",
     "apps.store_settings",
@@ -170,3 +171,14 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
+
+# Configuration SasPay
+SASPAY_BASE_URL = os.environ.get("SASPAY_BASE_URL", "https://api.saspay.me/api/v1")
+SASPAY_API_KEY = os.environ.get("SASPAY_API_KEY", "")
+SASPAY_WEBHOOK_SECRET = os.environ.get("SASPAY_WEBHOOK_SECRET", "")
+
+if not SASPAY_API_KEY:
+    if DEBUG:
+        SASPAY_API_KEY = "sk_test_placeholder"
+    else:
+        raise RuntimeError("SASPAY_API_KEY est obligatoire en production.")

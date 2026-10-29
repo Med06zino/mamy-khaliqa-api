@@ -133,3 +133,43 @@ class Payment(models.Model):
                 name="uniq_provider_reference",
             )
         ]
+
+
+class Invoice(models.Model):
+    """Facture liée à une commande.
+
+    Créée automatiquement (signal post_save) dès qu'une commande est enregistrée.
+    Stocke un snapshot des données au moment de la commande pour garantir
+    l'immuabilité : même si les prix ou adresses changent plus tard, la facture
+    conserve les valeurs d'origine.
+
+    Règle métier :
+    - Une commande a exactement une facture (OneToOne).
+    - Le numéro de facture est distinct du numéro de commande.
+    - La facture est accessible uniquement au client propriétaire et aux admins.
+    - Une facture sur une commande non payée est clairement marquée "en attente de paiement".
+    """
+
+    number   = models.CharField("Numéro de facture", max_length=30, unique=True, editable=False)
+    order    = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="invoice")
+    # Snapshot des données à la création — immuables
+    snapshot = models.JSONField(
+        "Données de la facture",
+        help_text="Snapshot JSON des données commande au moment de la création.",
+    )
+    issued_at = models.DateTimeField("Date d'émission", auto_now_add=True)
+
+    class Meta:
+        ordering = ["-issued_at"]
+        verbose_name = "Facture"
+        verbose_name_plural = "Factures"
+
+    def __str__(self):
+        return self.number
+
+    @staticmethod
+    def generate_number(order_number: str) -> str:
+        """Génère un numéro de facture à partir du numéro de commande.
+        Ex : MK-261025-AB12CD → FAC-261025-AB12CD
+        """
+        return order_number.replace("MK-", "FAC-", 1)

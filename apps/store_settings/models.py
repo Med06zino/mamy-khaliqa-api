@@ -27,6 +27,16 @@ class StoreSettings(models.Model):
     low_stock_threshold = models.PositiveIntegerField("Seuil de stock faible", default=5)
     guest_checkout_enabled = models.BooleanField("Commande sans compte", default=True)
     payment_cash_on_delivery = models.BooleanField("Paiement a la livraison", default=False)
+    payment_wave_enabled = models.BooleanField(
+        "Paiement Wave (mobile money)",
+        default=False,
+        help_text="Affiche Wave comme option de règlement. Ne confirme pas automatiquement le paiement.",
+    )
+    payment_orange_money_enabled = models.BooleanField(
+        "Paiement Orange Money (mobile money)",
+        default=False,
+        help_text="Affiche Orange Money comme option de règlement. Ne confirme pas automatiquement le paiement.",
+    )
     unknown_zone_policy = models.TextField(
         "Procedure si la zone n'est pas configuree",
         default="Les frais de livraison seront confirmes avec vous par la boutique avant l'expedition.",

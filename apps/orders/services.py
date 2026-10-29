@@ -1,4 +1,3 @@
-"""Logique metier des commandes. Le serveur recalcule prix, stock et frais : rien n'est pris du navigateur."""
 from django.db import IntegrityError, transaction
 from rest_framework.exceptions import ValidationError
 
@@ -67,9 +66,11 @@ def create_order(*, user, data, idempotency_key=None):
         unit = variant.effective_price if variant else product.price
         subtotal += unit * qty
         lines.append((product, variant, unit, qty))
+
     if errors:
         raise ValidationError({"items": errors})
 
+    # Calcul des frais de livraison
     zone = None
     fee, fee_pending, zone_name = 0, False, ""
     if data.get("delivery_zone"):
@@ -78,24 +79,27 @@ def create_order(*, user, data, idempotency_key=None):
             raise ValidationError({"delivery_zone": "Zone de livraison inconnue."})
         fee, zone_name = zone.fee, zone.name
     else:
-        fee_pending, zone_name = True, "Autre zone (frais a confirmer)"
+        fee_pending, zone_name = True, "Autre zone (frais à confirmer)"
+
+    total_amount = subtotal + fee
 
     try:
-        with transaction.atomic():
-            order = Order.objects.create(
-                user=user,
-                idempotency_key=idempotency_key or None,
-                source=data.get("source", Order.Source.WEB),
-                first_name=data["first_name"], last_name=data["last_name"],
-                email=data.get("email", ""), phone=data["phone"],
-                address_line=data["address_line"], city=data.get("city", ""),
-                delivery_zone=zone, delivery_zone_name=zone_name,
-                customer_note=data.get("customer_note", ""),
-                subtotal=subtotal, delivery_fee=fee, delivery_fee_pending=fee_pending,
-                total=subtotal + fee,
-            )
-    except IntegrityError:  # double soumission concurrente avec la meme cle
-        # Reconstruire la queryset selon que l'utilisateur est authentifie ou guest.
+        # Création de la commande
+        order = Order.objects.create(
+            user=user,
+            idempotency_key=idempotency_key or None,
+            source=data.get("source", Order.Source.WEB),
+            first_name=data["first_name"], last_name=data["last_name"],
+            email=data.get("email", ""), phone=data["phone"],
+            address_line=data["address_line"], city=data.get("city", ""),
+            delivery_zone=zone, delivery_zone_name=zone_name,
+            customer_note=data.get("customer_note", ""),
+            subtotal=subtotal, delivery_fee=fee, delivery_fee_pending=fee_pending,
+            total=total_amount,
+            payment_method=data.get("payment_method", ""),
+        )
+    except IntegrityError:  # double soumission concurrente avec la même clé
+        # Reconstruire la queryset selon que l'utilisateur est authentifié ou guest.
         if user is not None:
             return Order.objects.get(idempotency_key=idempotency_key, user=user), False
         else:

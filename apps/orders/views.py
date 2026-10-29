@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import Count, Q, Sum
+from django.http import HttpResponse
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -12,8 +13,10 @@ from apps.common.permissions import IsStaffUser
 from apps.store_settings.models import StoreSettings
 
 from .models import Order, OrderItem
+from .pdf import generate_invoice_pdf, send_invoice_email
 from .serializers import (
-    AdminOrderUpdateSerializer, OrderCreateSerializer, OrderListSerializer, OrderSerializer,
+    AdminOrderUpdateSerializer, InvoiceSerializer,
+    OrderCreateSerializer, OrderListSerializer, OrderSerializer,
 )
 from .services import change_status, create_order
 
@@ -46,8 +49,39 @@ class OrderViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.Retrie
         order, created = create_order(user=user, data=s.validated_data, idempotency_key=key)
         return Response(OrderSerializer(order).data, status=201 if created else 200)
 
-    @action(detail=True, methods=["post"])
-    def cancel(self, request, number=None):
+    @action(detail=True, methods=["get"])
+    def invoice(self, request, number=None):
+        """GET /api/v1/orders/{number}/invoice/
+
+        Retourne la facture de la commande.
+        - Le client n'accède qu'à ses propres factures (isolation garantie par get_object()).
+        - Si la facture n'existe pas encore (commande très récente), retourne 404.
+        """
+        order = self.get_object()
+        try:
+            inv = order.invoice
+        except order.__class__.invoice.RelatedObjectDoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("Facture non encore disponible. Réessayez dans quelques secondes.")
+        return Response(InvoiceSerializer(inv).data)
+
+    @action(detail=True, methods=["get"], url_path="invoice/download")
+    def download_invoice(self, request, number=None):
+        """GET /api/v1/orders/{number}/invoice/download/
+
+        Télécharge la facture PDF de la commande.
+        """
+        order = self.get_object()
+        try:
+            inv = order.invoice
+        except order.__class__.invoice.RelatedObjectDoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("Facture non encore disponible.")
+
+        pdf_buffer = generate_invoice_pdf(order)
+        response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="Facture_{inv.number}.pdf"'
+        return response
         order = self.get_object()
         if order.status != Order.Status.PENDING:
             raise ValidationError({"status": "Seule une commande en attente peut etre annulee. Contactez la boutique."})
@@ -69,6 +103,17 @@ class AdminOrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     def get_serializer_class(self):
         return OrderListSerializer if self.action == "list" else OrderSerializer
 
+    @action(detail=True, methods=["get"])
+    def invoice(self, request, number=None):
+        """GET /api/v1/admin/orders/{number}/invoice/ — Facture côté admin."""
+        order = self.get_object()
+        try:
+            inv = order.invoice
+        except order.__class__.invoice.RelatedObjectDoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("Facture non encore disponible.")
+        return Response(InvoiceSerializer(inv).data)
+
     @action(detail=True, methods=["patch"], url_path="update")
     @transaction.atomic
     def update_order(self, request, number=None):
@@ -80,9 +125,18 @@ class AdminOrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             order = change_status(order, d["status"], by=request.user, note=d.get("note", ""))
         fields = []
         if "payment_status" in d:
-            if d["payment_status"] == Order.PaymentStatus.PAID and order.status == Order.Status.CANCELLED:
-                raise ValidationError({"payment_status": "Une commande annulee ne peut pas etre marquee payee."})
-            order.payment_status = d["payment_status"]
+            new_ps = d["payment_status"]
+            # Règle stricte : l'admin ne peut PAS marquer manuellement une commande comme payée
+            if new_ps == Order.PaymentStatus.PAID:
+                raise ValidationError(
+                    {"payment_status": "Le statut PAID ne peut être défini que par un système de paiement vérifié. Contactez le support technique."}
+                )
+            # L'admin peut uniquement rembourser une commande déjà payée
+            if new_ps == Order.PaymentStatus.REFUNDED and order.payment_status != Order.PaymentStatus.PAID:
+                raise ValidationError(
+                    {"payment_status": "Seule une commande déjà payée peut être remboursée."}
+                )
+            order.payment_status = new_ps
             fields.append("payment_status")
         if "tracking_info" in d:
             order.tracking_info = d["tracking_info"]
@@ -106,8 +160,14 @@ class AdminDashboardView(APIView):
         threshold = StoreSettings.load().low_stock_threshold
         orders = Order.objects.all()
         by = lambda *st: orders.filter(status__in=st).count()
-        revenue = orders.filter(payment_status=Order.PaymentStatus.PAID).exclude(
-            status=Order.Status.CANCELLED).aggregate(t=Sum("total"))["t"] or 0
+        # CA : commandes payées, non annulées, non remboursées
+        revenue = orders.filter(
+            payment_status=Order.PaymentStatus.PAID
+        ).exclude(
+            status=Order.Status.CANCELLED
+        ).exclude(
+            payment_status=Order.PaymentStatus.REFUNDED
+        ).aggregate(t=Sum("total"))["t"] or 0
 
         from apps.catalog.views import with_availability
 
