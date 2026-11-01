@@ -87,7 +87,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # PostgreSQL est l'unique base de données supportée (développement et production).
-DEFAULT_DATABASE_URL = "postgresql://khaliqa_db_user:Z0OSMzdrJc8hHRJ77Gg3UimbtOsNJgOm@dpg-dbjrpd7f3r2c73cvb3k0-a/khaliqa_db"
+DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mamy_khaliqa"
 
 DATABASES = {
     "default": dj_database_url.config(
