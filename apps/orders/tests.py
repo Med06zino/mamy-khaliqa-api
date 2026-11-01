@@ -75,7 +75,11 @@ class OrderTests(TestCase):
         url = f"/api/v1/admin/orders/{num}/update/"
         self.assertEqual(s.patch(url, {"status": "delivered"}, format="json").status_code, 400)
         self.assertEqual(s.patch(url, {"status": "confirmed", "tracking_info": "Livreur: Moussa"}, format="json").status_code, 200)
-        self.assertEqual(s.patch(url, {"payment_status": "paid"}, format="json").json()["payment_status"], "paid")
+        self.assertEqual(s.patch(url, {"payment_status": "paid"}, format="json").status_code, 400)
+        from apps.orders.models import Order
+        o = Order.objects.get(number=num)
+        o.payment_status = Order.PaymentStatus.PAID
+        o.save()
         dash = s.get("/api/v1/admin/dashboard/").json()
         self.assertEqual((dash["orders_total"], dash["revenue_collected"]), (1, 6500))
 
@@ -148,13 +152,12 @@ class PaymentTests(TestCase):
 
     # ── Règles de marquage paid / refunded ──────────────────────
 
-    def test_admin_can_mark_paid(self):
-        """L'admin peut marquer une commande comme payée."""
+    def test_admin_cannot_mark_paid(self):
+        """L'admin ne peut PAS marquer manuellement une commande comme payée."""
         num = self._create_order()
         s = client_for(make_staff())
         r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"}, format="json")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["payment_status"], "paid")
+        self.assertEqual(r.status_code, 400)
 
     def test_cannot_mark_paid_a_cancelled_order(self):
         """On ne peut pas marquer payée une commande annulée."""
@@ -170,8 +173,11 @@ class PaymentTests(TestCase):
     def test_admin_can_refund_a_paid_order(self):
         """L'admin peut rembourser une commande déjà payée."""
         num = self._create_order()
+        from apps.orders.models import Order
+        o = Order.objects.get(number=num)
+        o.payment_status = Order.PaymentStatus.PAID
+        o.save()
         s = client_for(make_staff())
-        s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "paid"}, format="json")
         r = s.patch(f"/api/v1/admin/orders/{num}/update/", {"payment_status": "refunded"}, format="json")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["payment_status"], "refunded")

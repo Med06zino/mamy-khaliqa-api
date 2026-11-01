@@ -26,11 +26,11 @@ services:
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: DJANGO_ALLOWED_HOSTS
-        value: ".onrender.com,localhost,127.0.0.1"
+        value: "mamy-khaliqa-backend.onrender.com,.onrender.com,localhost,127.0.0.1"
       - key: CORS_ALLOWED_ORIGINS
         value: "https://mamy-khaliqa-web.vercel.app,https://mamy-khaliqa.vercel.app,http://localhost:5173"
       - key: CSRF_TRUSTED_ORIGINS
-        value: "https://mamy-khaliqa-web.vercel.app,https://mamy-khaliqa.vercel.app,http://localhost:5173"
+        value: "https://mamy-khaliqa-web.vercel.app,https://mamy-khaliqa.vercel.app,https://mamy-khaliqa-backend.onrender.com,http://localhost:5173"
       - key: FRONTEND_URL
         value: "https://mamy-khaliqa-web.vercel.app"
       - key: PYTHON_VERSION

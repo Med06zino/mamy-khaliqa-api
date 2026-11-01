@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from corsheaders.defaults import default_headers
 import dj_database_url
 from dotenv import load_dotenv
 
@@ -24,7 +25,13 @@ if not SECRET_KEY:
     else:
         raise RuntimeError("DJANGO_SECRET_KEY est obligatoire en production.")
 
-ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+DEFAULT_ALLOWED_HOSTS = (
+    "mamy-khaliqa-backend.onrender.com,"
+    ".onrender.com,"
+    "localhost,"
+    "127.0.0.1"
+)
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -51,9 +58,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -153,17 +160,58 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
 }
 
-CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+# ── CORS & CSRF Configuration ───────────────────────────────────────
+DEFAULT_CORS_ORIGINS = (
+    "https://mamy-khaliqa-web.vercel.app,"
+    "https://mamy-khaliqa.vercel.app,"
+    "http://localhost:5173,"
+    "http://127.0.0.1:5173"
+)
+CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ORIGINS)
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "http://localhost:5173")
-CSRF_COOKIE_HTTPONLY = False  # lu par le frontend pour l'en-tete X-CSRFToken
+
+# Méthodes HTTP autorisées pour le pré-vol (OPTIONS)
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
+# En-têtes autorisés (inclut idempotency-key utilisé pour les commandes frontend)
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "idempotency-key",
+]
+
+# En-têtes exposés aux clients JavaScript
+CORS_EXPOSE_HEADERS = [
+    "Content-Type",
+    "X-CSRFToken",
+]
+
+# Durée de mise en cache du preflight OPTIONS par le navigateur (24h)
+CORS_PREFLIGHT_MAX_AGE = 86400
+
+DEFAULT_CSRF_TRUSTED_ORIGINS = (
+    "https://mamy-khaliqa-web.vercel.app,"
+    "https://mamy-khaliqa.vercel.app,"
+    "https://mamy-khaliqa-backend.onrender.com,"
+    "http://localhost:5173,"
+    "http://127.0.0.1:5173"
+)
+CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", DEFAULT_CSRF_TRUSTED_ORIGINS)
+CSRF_COOKIE_HTTPONLY = False  # lu par le frontend pour l'en-tête X-CSRFToken
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
 CSRF_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
 
+# Détection proxy SSL (Render termine le HTTPS en amont)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 if not DEBUG:
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
-    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = 31536000
@@ -172,18 +220,13 @@ if not DEBUG:
 
 EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Mamy Khaliqa <no-reply@example.com>")
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://mamy-khaliqa-web.vercel.app")
 DEFAULT_WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "")
 
 # ── Wave Senegal Configuration ─────────────────────────────────────
 WAVE_API_KEY = os.environ.get("WAVE_API_KEY", "")
 WAVE_WEBHOOK_SECRET = os.environ.get("WAVE_WEBHOOK_SECRET", "")
 WAVE_SIMULATION_MODE = env_bool("WAVE_SIMULATION_MODE", False)
-
-# ── SasPay Configuration ───────────────────────────────────────────
-SASPAY_API_KEY = os.environ.get("SASPAY_API_KEY", "")
-SASPAY_BASE_URL = os.environ.get("SASPAY_BASE_URL", "https://api.saspay.me/api/v1")
-SASPAY_WEBHOOK_SECRET = os.environ.get("SASPAY_WEBHOOK_SECRET", "")
 
 # ── Notifications Administrateur (Paiements reçus) ────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -201,7 +244,7 @@ LOGGING = {
     "root": {"handlers": ["console"], "level": "INFO"},
 }
 
-# Configuration SasPay
+# ── Configuration SasPay ───────────────────────────────────────────
 SASPAY_BASE_URL = os.environ.get("SASPAY_BASE_URL", "https://api.saspay.me/api/v1")
 SASPAY_API_KEY = os.environ.get("SASPAY_API_KEY", "")
 SASPAY_WEBHOOK_SECRET = os.environ.get("SASPAY_WEBHOOK_SECRET", "")
