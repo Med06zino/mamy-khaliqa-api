@@ -1,0 +1,59 @@
+# Configuration Infrastructure-as-Code Render (Blueprint pour mamy-khaliqa-api)
+# Documentation : https://render.com/docs/blueprint-spec
+
+databases:
+  - name: mamy-khaliqa-db
+    databaseName: mamy_khaliqa
+    user: mamy
+    region: frankfurt # ou oregon selon vos préférences
+    plan: free
+
+services:
+  - type: web
+    name: mamy-khaliqa-backend
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: ./build.sh
+    startCommand: gunicorn config.wsgi:application
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mamy-khaliqa-db
+          property: connectionString
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com,localhost,127.0.0.1"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://mamy-khaliqa-web.vercel.app,https://mamy-khaliqa.vercel.app,http://localhost:5173"
+      - key: CSRF_TRUSTED_ORIGINS
+        value: "https://mamy-khaliqa-web.vercel.app,https://mamy-khaliqa.vercel.app,http://localhost:5173"
+      - key: FRONTEND_URL
+        value: "https://mamy-khaliqa-web.vercel.app"
+      - key: PYTHON_VERSION
+        value: 3.12.0
+
+      # ── Wave Senegal Business ───────────────────────────────────────────
+      - key: WAVE_API_KEY
+        sync: false
+      - key: WAVE_WEBHOOK_SECRET
+        sync: false
+      - key: WAVE_SIMULATION_MODE
+        value: "False"
+
+      # ── Notifications WhatsApp UltraMsg ─────────────────────────────────
+      - key: ULTRAMSG_INSTANCE_ID
+        value: "instance195865"
+      - key: ULTRAMSG_TOKEN
+        value: "275nkq7aip3yzq6v"
+      - key: ADMIN_WHATSAPP_NUMBER
+        value: "+2217104927804"
+
+      # ── Passerelle SasPay ───────────────────────────────────────────────
+      - key: SASPAY_API_KEY
+        sync: false
+      - key: SASPAY_WEBHOOK_SECRET
+        sync: false

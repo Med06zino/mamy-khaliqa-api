@@ -79,13 +79,23 @@ TEMPLATES = [
 ]
 WSGI_APPLICATION = "config.wsgi.application"
 
+# PostgreSQL est l'unique base de données supportée (développement et production).
+DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mamy_khaliqa"
+
 DATABASES = {
     "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}", conn_max_age=600
+        default=DEFAULT_DATABASE_URL,
+        conn_max_age=600,
+        conn_health_checks=True,
     )
 }
-if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3") and not os.environ.get("ALLOW_SQLITE"):
-    raise RuntimeError("DATABASE_URL (PostgreSQL) est obligatoire en production.")
+
+# Règle impérative : interdiction formelle de SQLite
+if "sqlite" in DATABASES["default"].get("ENGINE", "").lower():
+    raise RuntimeError(
+        "SQLite est définitivement supprimé du projet Mamy Khaliqa. "
+        "PostgreSQL est le seul SGBD autorisé. Veuillez configurer DATABASE_URL."
+    )
 
 AUTH_USER_MODEL = "accounts.User"
 AUTH_PASSWORD_VALIDATORS = [
@@ -148,8 +158,8 @@ CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "http://localhost:5173")
 CSRF_COOKIE_HTTPONLY = False  # lu par le frontend pour l'en-tete X-CSRFToken
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = "Lax"
-CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
+CSRF_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
 
 if not DEBUG:
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
@@ -164,6 +174,25 @@ EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.conso
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Mamy Khaliqa <no-reply@example.com>")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 DEFAULT_WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "")
+
+# ── Wave Senegal Configuration ─────────────────────────────────────
+WAVE_API_KEY = os.environ.get("WAVE_API_KEY", "")
+WAVE_WEBHOOK_SECRET = os.environ.get("WAVE_WEBHOOK_SECRET", "")
+WAVE_SIMULATION_MODE = env_bool("WAVE_SIMULATION_MODE", False)
+
+# ── SasPay Configuration ───────────────────────────────────────────
+SASPAY_API_KEY = os.environ.get("SASPAY_API_KEY", "")
+SASPAY_BASE_URL = os.environ.get("SASPAY_BASE_URL", "https://api.saspay.me/api/v1")
+SASPAY_WEBHOOK_SECRET = os.environ.get("SASPAY_WEBHOOK_SECRET", "")
+
+# ── Notifications Administrateur (Paiements reçus) ────────────────
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
+ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID", "")
+ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN", "")
+ADMIN_WHATSAPP_NUMBER = os.environ.get("ADMIN_WHATSAPP_NUMBER", "")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+ADMIN_NOTIFICATION_EMAIL = os.environ.get("ADMIN_NOTIFICATION_EMAIL", "")
 
 LOGGING = {
     "version": 1,

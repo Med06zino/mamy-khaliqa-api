@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 db.sqlite3
-media/
+*.bak
+backup_*.json
 staticfiles/
 .venv/
+media/*
+!media/categories/
+!media/categories/*
+!media/products/
+!media/products/*

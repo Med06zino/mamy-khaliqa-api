@@ -10,282 +10,371 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
 
-from .models import SasPayCheckoutSession, SasPayWebhookLog, WaveCheckoutSession
+from apps.orders.models import Order, Payment
+from apps.orders.services import change_status
+
+from .models import PaymentWebhookLog, SasPayCheckoutSession, WaveCheckoutSession
+from .notifications import send_admin_order_notification
 
 logger = logging.getLogger(__name__)
 
-# Tolérance de 5 minutes pour la vérification des webhooks
-WEBHOOK_TOLERANCE_SECONDS = 300
+WEBHOOK_TOLERANCE_SECONDS = 300  # 5 minutes de tolérance anti-rejeu
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. INTÉGRATION WAVE BUSINESS (API Wave Sénégal)
+# ═══════════════════════════════════════════════════════════════════════════
 
 def create_wave_checkout_session(order):
-    """Crée une session de paiement Wave simulée pour les tests.
+    """Crée une session de paiement Wave Checkout.
 
-    Cette fonction simule l'API Wave en mode test.
-    En production, elle sera remplacée par l'API Wave officielle.
-
-    Args:
-        order: Instance de Order
-
-    Returns:
-        WaveCheckoutSession: La session créée avec checkout_url simulé
-    """
-    # Simuler la création d'une session Wave
-    session_id = f"wave_test_{secrets.token_hex(16)}"
-
-    # En mode simulation, générer une URL locale pour tester
-    checkout_url = f"{settings.FRONTEND_URL}/wave/payment/{session_id}"
-
-    # Créer ou mettre à jour la session locale
-    session, created = WaveCheckoutSession.objects.update_or_create(
-        order=order,
-        defaults={
-            "session_id": session_id,
-            "checkout_url": checkout_url,
-            "amount": Decimal(order.total) / 100,
-            "currency": "XOF",
-            "status": WaveCheckoutSession.Status.PENDING,
-            "raw_response": {"simulated": True, "test_mode": True},
-        },
-    )
-
-    logger.info(f"Wave session created for order {order.number}: {session.session_id}")
-    return session
-
-
-def simulate_wave_payment(session_id, success=True):
-    """Simule un paiement Wave réussi ou échoué.
-
-    Cette fonction est utilisée uniquement pour les tests.
-    En production, le paiement sera traité par les webhooks Wave.
-
-    Args:
-        session_id: ID de la session Wave
-        success: True pour simuler un succès, False pour un échec
-
-    Returns:
-        WaveCheckoutSession: La session mise à jour
-    """
-    try:
-        session = WaveCheckoutSession.objects.get(session_id=session_id)
-    except WaveCheckoutSession.DoesNotExist:
-        raise ValidationError({"wave": "Session Wave introuvable"})
-
-    if session.status != WaveCheckoutSession.Status.PENDING:
-        raise ValidationError({"wave": "Cette session n'est plus en attente"})
-
-    # Simuler le paiement
-    if success:
-        session.status = WaveCheckoutSession.Status.PAID
-        session.wave_transaction_id = f"txn_{secrets.token_hex(16)}"
-
-        # Mettre à jour la commande
-        from apps.orders.models import Order
-        from apps.orders.services import change_status
-
-        order = session.order
-        if order.payment_status != Order.PaymentStatus.PAID:
-            order.payment_status = Order.PaymentStatus.PAID
-            order.payment_method = "wave"
-            order.save(update_fields=["payment_status", "payment_method"])
-
-            if order.status == Order.Status.PENDING:
-                change_status(order, Order.Status.CONFIRMED, note="Paiement Wave confirmé (simulation)")
-
-        logger.info(f"Wave payment simulated successfully for order {order.number}")
-    else:
-        session.status = WaveCheckoutSession.Status.FAILED
-        logger.warning(f"Wave payment simulated as failed for order {session.order.number}")
-
-    session.save()
-    return session
-
-
-def create_saspay_checkout_session(order):
-    """Crée une session de checkout SasPay pour une commande.
-
-    Utilise l'endpoint officiel POST /checkout-sessions/
-    Documentation: https://docs.saspay.me/api-reference/payments/checkout-create
+    Appelle l'API officielle POST https://api.wave.com/v1/checkout/sessions
+    Docs officielles : https://docs.wave.com
 
     Args:
         order: Instance de Order
 
     Returns:
-        SasPayCheckoutSession: La session créée avec checkout_url
-
-    Raises:
-        ValidationError: Si l'appel API échoue ou si SasPay n'est pas configuré
+        WaveCheckoutSession: Session enregistrée avec l'URL de redirection Wave
     """
-    api_key = settings.SASPAY_API_KEY
+    if order.payment_status == Order.PaymentStatus.PAID:
+        raise ValidationError({"order": "Cette commande est déjà payée."})
 
-    # Vérifier que SasPay est configuré
-    if not api_key or api_key == "sk_test_placeholder":
-        logger.warning(f"SasPay not configured (placeholder key). Order {order.number}")
-        raise ValidationError(
-            {"saspay": "Le paiement en ligne SasPay n'est pas configuré. Veuillez contacter l'administrateur ou choisir un autre mode de paiement."}
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    api_key = getattr(settings, "WAVE_API_KEY", "")
+
+    # Mode simulation si aucune clé n'est fournie ou en mode test local
+    is_simulation = not api_key or api_key.startswith("wave_test_mock") or getattr(settings, "WAVE_SIMULATION_MODE", False)
+
+    if is_simulation:
+        logger.info(f"[WAVE SIMULATION] Création d'une session Wave simulée pour la commande {order.number}")
+        sim_session_id = f"wave_sim_{secrets.token_hex(12)}"
+        checkout_url = f"{frontend_url}/commande/paiement/succes/{order.number}?simulated=true&session_id={sim_session_id}"
+
+        session, _ = WaveCheckoutSession.objects.update_or_create(
+            order=order,
+            defaults={
+                "session_id": sim_session_id,
+                "checkout_url": checkout_url,
+                "amount": order.total,
+                "currency": "XOF",
+                "status": WaveCheckoutSession.Status.PENDING,
+                "raw_response": {"simulated": True},
+            },
         )
+        return session
 
-    api_url = f"{settings.SASPAY_BASE_URL}/checkout-sessions/"
-
+    # Appel réel à l'API Wave Checkout
+    api_url = "https://api.wave.com/v1/checkout/sessions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-
-    # Construction du payload selon la documentation SasPay
     payload = {
-        "amount": str(Decimal(order.total) / 100),  # Convertir les centimes en décimal
+        "amount": str(order.total),
         "currency": "XOF",
-        "description": f"Commande {order.number}",
-        "customer_email": order.email or f"customer_{order.id}@example.com",
-        "customer_name": f"{order.first_name} {order.last_name}",
-        "customer_phone": order.phone,
-        "country": "SN",  # Sénégal par défaut
-        "return_url": f"{settings.FRONTEND_URL}/commande/paiement/succes/{order.number}",
-        "metadata": {
-            "order_number": order.number,
-            "order_id": order.id,
-        },
+        "error_url": f"{frontend_url}/commande/confirmation/{order.number}?payment_error=true",
+        "success_url": f"{frontend_url}/commande/paiement/succes/{order.number}?provider=wave",
+        "client_reference": order.number,
     }
 
     try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
+        response = requests.post(api_url, json=payload, headers=headers, timeout=12)
+        if response.status_code not in (200, 201):
+            logger.error(f"Erreur API Wave ({response.status_code}): {response.text}")
+            raise ValidationError({"wave": f"Erreur de communication avec Wave: {response.text}"})
+
         data = response.json()
+        session_id = data.get("id")
+        launch_url = data.get("wave_launch_url")
 
-        if not data.get("success"):
-            error = data.get("error", {})
-            raise ValidationError(
-                {"saspay": f"Erreur SasPay: {error.get('message', 'Erreur inconnue')}"}
-            )
+        if not launch_url:
+            raise ValidationError({"wave": "L'API Wave n'a pas retourné d'URL de redirection."})
 
-        session_data = data["data"]
-
-        # Créer ou mettre à jour la session locale
-        session, created = SasPayCheckoutSession.objects.update_or_create(
+        session, _ = WaveCheckoutSession.objects.update_or_create(
             order=order,
             defaults={
-                "session_id": session_data["id"],
-                "checkout_url": session_data["checkout_url"],
-                "amount": Decimal(session_data["amount"]),
-                "currency": session_data["currency"],
-                "status": _map_saspay_status(session_data.get("status", "PENDING")),
-                "raw_response": session_data,
+                "session_id": session_id,
+                "checkout_url": launch_url,
+                "amount": order.total,
+                "currency": data.get("currency", "XOF"),
+                "status": WaveCheckoutSession.Status.PENDING,
+                "raw_response": data,
             },
         )
-
-        logger.info(f"SasPay session created for order {order.number}: {session.session_id}")
+        logger.info(f"Session Wave créée avec succès: {session.session_id} pour {order.number}")
         return session
 
     except requests.RequestException as e:
-        logger.error(f"SasPay API error for order {order.number}: {str(e)}")
-        raise ValidationError({"saspay": f"Erreur de connexion à SasPay: {str(e)}"})
+        logger.error(f"Exception réseau lors de la création de la session Wave: {e}")
+        raise ValidationError({"wave": "Impossible de joindre le serveur de paiement Wave."})
 
 
-def verify_saspay_payment(session_id):
-    """Vérifie le statut d'un paiement auprès de SasPay.
+def verify_wave_signature(raw_body: bytes, signature_header: str) -> bool:
+    """Vérifie la signature HMAC SHA-256 du Webhook Wave.
 
-    Utilise l'endpoint GET /checkout-sessions/{id}/
-    Documentation: https://docs.saspay.me/api-reference/payments/checkout-status
-
-    Args:
-        session_id: UUID de la session SasPay
-
-    Returns:
-        dict: Les données de statut de la session
-
-    Raises:
-        ValidationError: Si l'appel API échoue
+    Header Wave-Signature format : t=1614555555,v1=5257186dbcdf...
     """
-    api_url = f"{settings.SASPAY_BASE_URL}/checkout-sessions/{session_id}/"
-    api_key = settings.SASPAY_API_KEY
+    secret = getattr(settings, "WAVE_WEBHOOK_SECRET", "")
+    if not secret:
+        logger.warning("WAVE_WEBHOOK_SECRET non configuré dans settings.")
+        return False
 
+    parts = dict(item.split("=", 1) for item in signature_header.split(",") if "=" in item)
+    timestamp = parts.get("t")
+    received_signature = parts.get("v1")
+
+    if not timestamp or not received_signature:
+        return False
+
+    # Protection anti-rejeu (tolérance de 5 minutes)
+    try:
+        ts_int = int(timestamp)
+        if abs(time.time() - ts_int) > WEBHOOK_TOLERANCE_SECONDS:
+            logger.warning(f"Webhook Wave rejeté : horodatage expiré ({timestamp})")
+            return False
+    except ValueError:
+        return False
+
+    # Calcul de la signature attendue
+    signed_payload = f"{timestamp}.".encode("utf-8") + raw_body
+    expected_signature = hmac.new(
+        secret.encode("utf-8"), signed_payload, hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(expected_signature, received_signature)
+
+
+@transaction.atomic
+def process_wave_webhook(raw_body: bytes, signature_header: str, payload: dict):
+    """Traite un événement Webhook Wave vérifié et valide la commande."""
+    event_id = payload.get("id", "")
+    event_type = payload.get("type", "")
+
+    # Journalisation de l'événement reçu
+    log = PaymentWebhookLog.objects.create(
+        provider="wave",
+        event_id=event_id,
+        event_type=event_type,
+        payload=payload,
+        signature=signature_header,
+        timestamp=str(int(time.time())),
+        processed=False,
+    )
+
+    if not verify_wave_signature(raw_body, signature_header):
+        log.error_message = "Signature Wave invalide."
+        log.save()
+        raise ValidationError("Signature de webhook invalide.")
+
+    # Idempotence : si l'événement a déjà été traité avec succès
+    if event_id and PaymentWebhookLog.objects.filter(provider="wave", event_id=event_id, processed=True).exists():
+        logger.info(f"Événement Wave déjà traité (idempotence): {event_id}")
+        return True
+
+    # Traitement de l'événement de complétion de paiement
+    if event_type == "checkout.session.completed":
+        data = payload.get("data", {})
+        client_ref = data.get("client_reference")  # Notre order.number
+        session_id = data.get("id")
+        amount = int(Decimal(str(data.get("amount", 0))))
+        wave_txn_id = data.get("transaction_id", session_id)
+
+        try:
+            order = Order.objects.select_for_update().get(number=client_ref)
+        except Order.DoesNotExist:
+            log.error_message = f"Commande introuvable pour client_reference: {client_ref}"
+            log.save()
+            logger.error(log.error_message)
+            return False
+
+        # Vérification du montant
+        if amount != order.total:
+            logger.warning(f"Écart de montant Wave: reçu={amount}, attendu={order.total}")
+
+        # Mise à jour de la session Wave
+        session = WaveCheckoutSession.objects.filter(order=order).first()
+        if session:
+            session.status = WaveCheckoutSession.Status.PAID
+            session.wave_transaction_id = wave_txn_id
+            session.raw_response = data
+            session.save()
+
+        # Validation de la commande si non déjà payée
+        if order.payment_status != Order.PaymentStatus.PAID:
+            order.payment_status = Order.PaymentStatus.PAID
+            order.payment_method = "wave"
+            order.save(update_fields=["payment_status", "payment_method", "updated_at"])
+
+            if order.status == Order.Status.PENDING:
+                change_status(order, Order.Status.CONFIRMED, note="Paiement Wave validé automatiquement par Webhook.")
+
+            # Création ou mise à jour de l'enregistrement Payment
+            Payment.objects.update_or_create(
+                order=order,
+                provider="wave",
+                defaults={
+                    "amount": order.total,
+                    "status": Payment.Status.SUCCEEDED,
+                    "provider_reference": wave_txn_id or session_id or "",
+                    "raw_event_id": event_id,
+                },
+            )
+
+            # Déclenchement automatique de la notification administrateur !
+            send_admin_order_notification(order, provider="Wave")
+            logger.info(f"Commande {order.number} marquée PAYÉE via Wave avec succès !")
+
+    log.processed = True
+    log.save()
+    return True
+
+
+@transaction.atomic
+def simulate_wave_payment(session_id: str, success: bool = True):
+    """Permet de simuler la validation d'un paiement Wave (développement local)."""
+    try:
+        session = WaveCheckoutSession.objects.select_for_update().get(session_id=session_id)
+    except WaveCheckoutSession.DoesNotExist:
+        raise ValidationError({"wave": "Session Wave introuvable"})
+
+    order = session.order
+    if success:
+        session.status = WaveCheckoutSession.Status.PAID
+        session.wave_transaction_id = f"txn_sim_{secrets.token_hex(8)}"
+        session.save()
+
+        if order.payment_status != Order.PaymentStatus.PAID:
+            order.payment_status = Order.PaymentStatus.PAID
+            order.payment_method = "wave"
+            order.save(update_fields=["payment_status", "payment_method", "updated_at"])
+
+            if order.status == Order.Status.PENDING:
+                change_status(order, Order.Status.CONFIRMED, note="Paiement Wave validé (simulation de test).")
+
+            Payment.objects.update_or_create(
+                order=order,
+                provider="wave",
+                defaults={
+                    "amount": order.total,
+                    "status": Payment.Status.SUCCEEDED,
+                    "provider_reference": session.wave_transaction_id,
+                },
+            )
+            # Notification automatique admin en simulation
+            send_admin_order_notification(order, provider="Wave (Simulation)")
+            logger.info(f"Simulation paiement Wave réussie pour {order.number}")
+    else:
+        session.status = WaveCheckoutSession.Status.FAILED
+        session.save()
+
+    return session
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2. INTÉGRATION PASSERELLE SASPAY
+# ═══════════════════════════════════════════════════════════════════════════
+
+def create_saspay_checkout_session(order):
+    """Crée une session de paiement SasPay pour une commande."""
+    if order.payment_status == Order.PaymentStatus.PAID:
+        raise ValidationError({"order": "Cette commande est déjà payée."})
+
+    api_key = getattr(settings, "SASPAY_API_KEY", "")
+    base_url = getattr(settings, "SASPAY_BASE_URL", "https://api.saspay.me/api/v1").rstrip("/")
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+    # Mode simulation si clé fictive
+    if not api_key or api_key.startswith("sk_test_placeholder"):
+        sim_session_id = f"saspay_sim_{secrets.token_hex(12)}"
+        checkout_url = f"{frontend_url}/paiement/succes?order={order.number}&simulated=true&saspay={sim_session_id}"
+        session, _ = SasPayCheckoutSession.objects.update_or_create(
+            order=order,
+            defaults={
+                "session_id": sim_session_id,
+                "checkout_url": checkout_url,
+                "amount": order.total,
+                "currency": "XOF",
+                "status": SasPayCheckoutSession.Status.PENDING,
+                "raw_response": {"simulated": True},
+            },
+        )
+        return session
+
+    api_url = f"{base_url}/checkout-sessions/"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    payload = {
+        "amount": str(Decimal(order.total) / 100 if order.total > 100000 else order.total),
+        "currency": "XOF",
+        "description": f"Commande Mamy Khaliqa {order.number}",
+        "customer_email": order.email or f"client_{order.id}@mamy-khaliqa.com",
+        "customer_name": f"{order.first_name} {order.last_name}",
+        "customer_phone": order.phone,
+        "metadata": {"order_number": order.number},
+        "success_url": f"{frontend_url}/commande/paiement/succes/{order.number}?provider=wave",
+        "cancel_url": f"{frontend_url}/paiement/erreur?order={order.number}",
+    }
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=30)
-        response.raise_for_status()
+        response = requests.post(api_url, json=payload, headers=headers, timeout=12)
+        if response.status_code not in (200, 201):
+            logger.error(f"Erreur SasPay ({response.status_code}): {response.text}")
+            raise ValidationError({"saspay": f"Erreur de communication avec SasPay: {response.text}"})
+
         data = response.json()
+        session_id = data.get("id")
+        checkout_url = data.get("checkout_url")
 
-        if not data.get("success"):
-            error = data.get("error", {})
-            raise ValidationError(
-                {"saspay": f"Erreur SasPay: {error.get('message', 'Erreur inconnue')}"}
-            )
+        if not checkout_url:
+            raise ValidationError({"saspay": "SasPay n'a pas renvoyé d'URL de paiement."})
 
-        return data["data"]
+        session, _ = SasPayCheckoutSession.objects.update_or_create(
+            order=order,
+            defaults={
+                "session_id": session_id,
+                "checkout_url": checkout_url,
+                "amount": order.total,
+                "currency": "XOF",
+                "status": SasPayCheckoutSession.Status.PENDING,
+                "raw_response": data,
+            },
+        )
+        return session
 
     except requests.RequestException as e:
-        logger.error(f"SasPay verification error for session {session_id}: {str(e)}")
-        raise ValidationError({"saspay": f"Erreur de vérification SasPay: {str(e)}"})
+        logger.error(f"Exception réseau SasPay: {e}")
+        raise ValidationError({"saspay": "Impossible de joindre la passerelle SasPay."})
 
 
-def verify_webhook_signature(raw_body, signature, timestamp, secret):
-    """Vérifie la signature HMAC-SHA256 d'un webhook SasPay.
+def verify_saspay_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
+    """Vérifie la signature HMAC SHA-256 du webhook SasPay."""
+    secret = getattr(settings, "SASPAY_WEBHOOK_SECRET", "")
+    if not secret:
+        return True  # Si non configuré en dev
 
-    Documentation: https://docs.saspay.me/api-reference/webhooks#sécurité--vérifier-la-signature
-
-    Args:
-        raw_body: Corps brut de la requête (bytes)
-        signature: Header X-Webhook-Signature
-        timestamp: Header X-Webhook-Timestamp
-        secret: Signing secret du webhook
-
-    Returns:
-        bool: True si signature valide, False sinon
-    """
-    # Vérifier l'âge du timestamp (tolérance 5 minutes)
-    now = int(time.time())
-    if abs(now - int(timestamp)) > WEBHOOK_TOLERANCE_SECONDS:
-        logger.warning(f"Webhook timestamp too old: {timestamp}")
+    try:
+        ts_int = int(timestamp)
+        if abs(time.time() - ts_int) > WEBHOOK_TOLERANCE_SECONDS:
+            return False
+    except ValueError:
         return False
 
-    # Calculer la signature attendue
-    signed = f"{timestamp}.".encode() + raw_body
-    expected = hmac.new(
-        secret.encode(), signed, hashlib.sha256
-    ).hexdigest()
-
-    # Comparaison en temps constant pour éviter les attaques par timing
-    return hmac.compare_digest(expected, signature)
+    payload_to_sign = f"{timestamp}.".encode("utf-8") + raw_body
+    computed = hmac.new(secret.encode("utf-8"), payload_to_sign, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(computed, signature)
 
 
-def process_saspay_webhook(raw_body, signature, timestamp, event_type, payload):
-    """Traite un webhook reçu de SasPay.
+@transaction.atomic
+def process_saspay_webhook(raw_body: bytes, signature: str, timestamp: str, event_type: str, payload: dict):
+    """Traite un webhook reçu de SasPay."""
+    event_id = payload.get("id", "")
 
-    Args:
-        raw_body: Corps brut de la requête (bytes)
-        signature: Header X-Webhook-Signature
-        timestamp: Header X-Webhook-Timestamp
-        event_type: Header X-Webhook-Event
-        payload: Corps JSON du webhook
-
-    Returns:
-        bool: True si traité avec succès
-
-    Raises:
-        ValidationError: Si signature invalide ou erreur de traitement
-    """
-    # Vérifier la signature
-    if not verify_webhook_signature(
-        raw_body, signature, timestamp, settings.SASPAY_WEBHOOK_SECRET
-    ):
-        # Logger le webhook mais ne pas le traiter
-        SasPayWebhookLog.objects.create(
-            event_type=event_type,
-            payload=payload,
-            signature=signature,
-            timestamp=timestamp,
-            processed=False,
-            error_message="Signature invalide",
-        )
-        raise ValidationError({"webhook": "Signature invalide"})
-
-    # Logger le webhook
-    log = SasPayWebhookLog.objects.create(
+    log = PaymentWebhookLog.objects.create(
+        provider="saspay",
+        event_id=event_id,
         event_type=event_type,
         payload=payload,
         signature=signature,
@@ -293,143 +382,53 @@ def process_saspay_webhook(raw_body, signature, timestamp, event_type, payload):
         processed=False,
     )
 
-    try:
-        # Traiter selon le type d'événement
-        if event_type == "transaction.success":
-            _handle_transaction_success(payload, log)
-        elif event_type == "transaction.failed":
-            _handle_transaction_failed(payload, log)
-        elif event_type == "transaction.cancelled":
-            _handle_transaction_cancelled(payload, log)
-        else:
-            logger.info(f"Event type {event_type} not handled, logged only")
-
-        log.processed = True
+    if not verify_saspay_signature(raw_body, signature, timestamp):
+        log.error_message = "Signature SasPay invalide."
         log.save()
-        return True
+        raise ValidationError("Signature de webhook invalide.")
 
-    except Exception as e:
-        logger.error(f"Error processing webhook {event_type}: {str(e)}")
-        log.error_message = str(e)
-        log.save()
-        raise
+    if event_type in ("transaction.success", "payment.succeeded"):
+        metadata = payload.get("metadata", {})
+        order_number = metadata.get("order_number") or payload.get("client_reference")
+        transaction_id = payload.get("id")
 
+        if not order_number:
+            logger.warning("Aucun order_number dans le payload SasPay.")
+            return False
 
-def _handle_transaction_success(payload, log):
-    """Traite un événement transaction.success."""
-    from apps.orders.models import Order
-    from apps.orders.services import change_status
+        try:
+            order = Order.objects.select_for_update().get(number=order_number)
+        except Order.DoesNotExist:
+            logger.warning(f"Commande {order_number} non trouvée pour SasPay {transaction_id}")
+            return False
 
-    # Récupérer l'ID de transaction depuis le payload
-    transaction_id = payload.get("id")
-    reference = payload.get("reference")
-    amount = Decimal(payload.get("amount", "0"))
-    currency = payload.get("currency")
+        session = getattr(order, "saspay_session", None)
+        if session:
+            session.status = SasPayCheckoutSession.Status.PAID
+            session.saspay_transaction_id = transaction_id
+            session.save()
 
-    logger.info(f"Transaction success: {transaction_id}, ref: {reference}, amount: {amount}")
+        if order.payment_status != Order.PaymentStatus.PAID:
+            order.payment_status = Order.PaymentStatus.PAID
+            order.payment_method = "saspay"
+            order.save(update_fields=["payment_status", "payment_method", "updated_at"])
 
-    # Trouver la session SasPay correspondante via metadata
-    # Le metadata contient order_number passé lors de la création
-    metadata = payload.get("metadata", {})
-    order_number = metadata.get("order_number")
+            if order.status == Order.Status.PENDING:
+                change_status(order, Order.Status.CONFIRMED, note="Paiement SasPay confirmé automatiquement par Webhook.")
 
-    if not order_number:
-        logger.warning(f"No order_number in metadata for transaction {transaction_id}")
-        return
+            Payment.objects.update_or_create(
+                order=order,
+                provider="saspay",
+                defaults={
+                    "amount": order.total,
+                    "status": Payment.Status.SUCCEEDED,
+                    "provider_reference": transaction_id or "",
+                    "raw_event_id": event_id,
+                },
+            )
+            # Notification automatique admin
+            send_admin_order_notification(order, provider="SasPay")
 
-    try:
-        order = Order.objects.get(number=order_number)
-    except Order.DoesNotExist:
-        logger.warning(f"Order {order_number} not found for transaction {transaction_id}")
-        return
-
-    # Vérifier que le montant correspond
-    expected_amount = Decimal(order.total) / 100
-    if abs(amount - expected_amount) > Decimal("0.01"):
-        logger.error(
-            f"Amount mismatch for order {order_number}: expected {expected_amount}, got {amount}"
-        )
-        return
-
-    # Mettre à jour la session SasPay
-    session = getattr(order, "saspay_session", None)
-    if session:
-        session.status = SasPayCheckoutSession.Status.PAID
-        session.saspay_transaction_id = transaction_id
-        session.save()
-
-    # Marquer la commande comme payée
-    if order.payment_status != Order.PaymentStatus.PAID:
-        order.payment_status = Order.PaymentStatus.PAID
-        order.payment_method = "saspay"
-        order.save(update_fields=["payment_status", "payment_method"])
-
-        # Passer la commande en CONFIRMED si elle était PENDING
-        if order.status == Order.Status.PENDING:
-            change_status(order, Order.Status.CONFIRMED, note="Paiement SasPay confirmé")
-
-        logger.info(f"Order {order_number} marked as paid via SasPay")
-
-
-def _handle_transaction_failed(payload, log):
-    """Traite un événement transaction.failed."""
-    from apps.orders.models import Order
-
-    transaction_id = payload.get("id")
-    metadata = payload.get("metadata", {})
-    order_number = metadata.get("order_number")
-
-    if not order_number:
-        return
-
-    try:
-        order = Order.objects.get(number=order_number)
-    except Order.DoesNotExist:
-        return
-
-    # Mettre à jour la session SasPay
-    session = getattr(order, "saspay_session", None)
-    if session:
-        session.status = SasPayCheckoutSession.Status.FAILED
-        session.saspay_transaction_id = transaction_id
-        session.save()
-
-    logger.info(f"Order {order_number} payment failed via SasPay")
-
-
-def _handle_transaction_cancelled(payload, log):
-    """Traite un événement transaction.cancelled."""
-    from apps.orders.models import Order
-
-    transaction_id = payload.get("id")
-    metadata = payload.get("metadata", {})
-    order_number = metadata.get("order_number")
-
-    if not order_number:
-        return
-
-    try:
-        order = Order.objects.get(number=order_number)
-    except Order.DoesNotExist:
-        return
-
-    # Mettre à jour la session SasPay
-    session = getattr(order, "saspay_session", None)
-    if session:
-        session.status = SasPayCheckoutSession.Status.CANCELLED
-        session.saspay_transaction_id = transaction_id
-        session.save()
-
-    logger.info(f"Order {order_number} payment cancelled via SasPay")
-
-
-def _map_saspay_status(saspay_status):
-    """Mappe les statuts SasPay vers nos statuts locaux."""
-    mapping = {
-        "PENDING": SasPayCheckoutSession.Status.PENDING,
-        "PAID": SasPayCheckoutSession.Status.PAID,
-        "FAILED": SasPayCheckoutSession.Status.FAILED,
-        "CANCELLED": SasPayCheckoutSession.Status.CANCELLED,
-        "EXPIRED": SasPayCheckoutSession.Status.EXPIRED,
-    }
-    return mapping.get(saspay_status, SasPayCheckoutSession.Status.PENDING)
+    log.processed = True
+    log.save()
+    return True

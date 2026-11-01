@@ -2,7 +2,8 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import HttpResponse
-from django.urls import include, path
+from django.urls import include, path, re_path
+from django.views.static import serve
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.routers import DefaultRouter
 
@@ -13,7 +14,6 @@ from apps.contact import views as contact
 from apps.deliveries import views as deliv
 from apps.newsletter import views as newsletter
 from apps.orders import views as orders
-from apps.payments import urls as payments_urls
 from apps.reviews import views as reviews
 from apps.store_settings import views as store
 
@@ -90,11 +90,12 @@ urlpatterns = [
     path("api/v1/admin/dashboard/", orders.AdminDashboardView.as_view()),
     path("api/v1/admin/settings/",  store.AdminSettingsView.as_view()),
     path("api/v1/admin/",   include(admin_router.urls)),
-    path("api/v1/payments/", include(payments_urls)),
+    path("api/v1/payments/",include("apps.payments.urls")),
     path("api/v1/",         include(router.urls)),
     path("api/v1/newsletter/subscribe/", newsletter.NewsletterSubscribeView.as_view()),
     path("api/schema/",     SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/",       SpectacularSwaggerView.as_view(url_name="schema"), name="swagger"),
     path("sitemap.xml",     sitemap_view),
     path("robots.txt",      robots),
-] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    re_path(r"^media/(?P<path>.*)$", serve, {"document_root": settings.MEDIA_ROOT}),
+]

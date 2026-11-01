@@ -1,144 +1,169 @@
+import json
 import logging
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.orders.models import Order
 
 from .models import SasPayCheckoutSession, WaveCheckoutSession
-from .serializers import SasPayCheckoutSessionDetailSerializer
+from .serializers import SasPayCheckoutSessionSerializer, WaveCheckoutSessionSerializer
 from .services import (
     create_saspay_checkout_session,
     create_wave_checkout_session,
     process_saspay_webhook,
+    process_wave_webhook,
     simulate_wave_payment,
-    verify_saspay_payment,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class PaymentViewSet(viewsets.GenericViewSet):
-    """ViewSet principal pour gérer tous les paiements (Wave, SasPay, etc.)."""
+    """Endpoints de gestion des paiements client (Wave & SasPay)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     lookup_field = "number"
 
-    def get_queryset(self):
-        return Order.objects.filter(user=self.request.user)
+    def get_object(self):
+        number = self.kwargs.get("number")
+        order = get_object_or_404(Order, number=number)
+        # Sécurité : si la commande appartient à un utilisateur connecté, seul lui peut y accéder
+        if order.user and self.request.user.is_authenticated and order.user != self.request.user:
+            raise PermissionDenied("Vous n'êtes pas autorisé à accéder à cette commande.")
+        return order
+
+    @action(detail=True, methods=["get"], url_path="status")
+    def get_payment_status(self, request, number=None):
+        """Consulte l'état global du paiement pour une commande (Wave, SasPay, etc.)."""
+        order = self.get_object()
+        provider = order.payment_method or "unknown"
+        status_value = "unpaid"
+        if order.payment_status == Order.PaymentStatus.PAID:
+            status_value = "paid"
+        elif hasattr(order, "wave_session"):
+            status_value = order.wave_session.status
+            provider = "wave"
+        elif hasattr(order, "saspay_session"):
+            status_value = order.saspay_session.status
+            provider = "saspay"
+
+        return Response({
+            "order_number": order.number,
+            "payment_status": order.payment_status,
+            "status": status_value,
+            "payment_method": provider,
+            "total": order.total,
+        })
+
+    # ── Wave Senegal ─────────────────────────────────────────────────────────
 
     @action(detail=True, methods=["post"], url_path="wave/create")
     def create_wave_checkout(self, request, number=None):
-        """Crée une session de paiement Wave pour une commande."""
+        """Initialise une session de paiement Wave pour la commande."""
         order = self.get_object()
 
         if order.payment_status == Order.PaymentStatus.PAID:
             raise ValidationError({"order": "Cette commande est déjà payée."})
 
-        if hasattr(order, "wave_session"):
-            session = order.wave_session
-            if session.status == WaveCheckoutSession.Status.PENDING:
-                return Response({"checkout_url": session.checkout_url, "session_id": session.session_id})
-            elif session.status == WaveCheckoutSession.Status.PAID:
-                raise ValidationError({"order": "Cette commande est déjà payée via Wave."})
+        # Si une session en attente existe déjà, la renvoyer
+        if hasattr(order, "wave_session") and order.wave_session.status == WaveCheckoutSession.Status.PENDING:
+            serializer = WaveCheckoutSessionSerializer(order.wave_session)
+            return Response(serializer.data)
 
         session = create_wave_checkout_session(order)
-        return Response({
-            "checkout_url": session.checkout_url,
-            "session_id": session.session_id,
-            "simulated": True,
-        }, status=status.HTTP_201_CREATED)
+        serializer = WaveCheckoutSessionSerializer(session)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], url_path="wave/status")
+    def get_wave_status(self, request, number=None):
+        """Consulte l'état du paiement Wave pour une commande."""
+        order = self.get_object()
+        if not hasattr(order, "wave_session"):
+            raise ValidationError({"order": "Aucune session Wave initiée pour cette commande."})
+        serializer = WaveCheckoutSessionSerializer(order.wave_session)
+        return Response(serializer.data)
 
     @action(detail=False, methods=["post"], url_path="wave/simulate")
     def simulate_wave(self, request):
-        """Simule un paiement Wave (uniquement pour les tests)."""
+        """Endpoint de simulation pour les tests en développement local."""
         session_id = request.data.get("session_id")
         success = request.data.get("success", True)
-
         if not session_id:
-            raise ValidationError({"session_id": "session_id est requis"})
+            raise ValidationError({"session_id": "L'identifiant session_id est obligatoire."})
 
-        try:
-            session = simulate_wave_payment(session_id, success)
-            return Response({
-                "status": session.status,
-                "transaction_id": session.wave_transaction_id,
-            })
-        except ValidationError as e:
-            raise e
+        session = simulate_wave_payment(session_id, success=success)
+        return Response({
+            "status": session.status,
+            "order_number": session.order.number,
+            "transaction_id": session.wave_transaction_id,
+        })
+
+    # ── Passerelle SasPay ────────────────────────────────────────────────────
 
     @action(detail=True, methods=["post"], url_path="saspay/create")
     def create_saspay_checkout(self, request, number=None):
-        """Crée une session de paiement SasPay pour une commande."""
+        """Initialise une session de paiement SasPay pour la commande."""
         order = self.get_object()
 
         if order.payment_status == Order.PaymentStatus.PAID:
             raise ValidationError({"order": "Cette commande est déjà payée."})
 
-        if hasattr(order, "saspay_session"):
-            session = order.saspay_session
-            if session.status == SasPayCheckoutSession.Status.PENDING:
-                serializer = SasPayCheckoutSessionDetailSerializer(session)
-                return Response(serializer.data)
-            elif session.status == SasPayCheckoutSession.Status.PAID:
-                raise ValidationError({"order": "Cette commande est déjà payée via SasPay."})
+        if hasattr(order, "saspay_session") and order.saspay_session.status == SasPayCheckoutSession.Status.PENDING:
+            serializer = SasPayCheckoutSessionSerializer(order.saspay_session)
+            return Response(serializer.data)
 
-        try:
-            session = create_saspay_checkout_session(order)
-            serializer = SasPayCheckoutSessionDetailSerializer(session)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        except ValidationError as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Error creating SasPay session for order {number}: {str(e)}")
-            raise ValidationError(
-                {"saspay": "Erreur lors de la création de la session de paiement."}
-            )
+        session = create_saspay_checkout_session(order)
+        serializer = SasPayCheckoutSessionSerializer(session)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="saspay/status")
     def get_saspay_status(self, request, number=None):
-        """Récupère le statut du paiement SasPay d'une commande."""
+        """Consulte l'état du paiement SasPay pour une commande."""
         order = self.get_object()
-
         if not hasattr(order, "saspay_session"):
-            raise ValidationError({"order": "Aucune session SasPay pour cette commande."})
+            raise ValidationError({"order": "Aucune session SasPay initiée pour cette commande."})
+        serializer = SasPayCheckoutSessionSerializer(order.saspay_session)
+        return Response(serializer.data)
 
-        session = order.saspay_session
 
-        if session.status == SasPayCheckoutSession.Status.PAID:
-            serializer = SasPayCheckoutSessionDetailSerializer(session)
-            return Response(serializer.data)
+class WaveWebhookView(APIView):
+    """Endpoint Webhook Wave officiel (POST https://api.votresite.com/api/v1/payments/wave/webhook/)."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        signature_header = request.headers.get("Wave-Signature", "")
+        if not signature_header:
+            logger.warning("Webhook Wave reçu sans header Wave-Signature.")
+            return HttpResponse("Missing Wave-Signature header", status=status.HTTP_400_BAD_REQUEST)
+
+        raw_body = request.body
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except Exception:
+            payload = request.data
 
         try:
-            saspay_data = verify_saspay_payment(session.session_id)
-
-            from .services import _map_saspay_status
-
-            session.status = _map_saspay_status(saspay_data.get("status", "PENDING"))
-            if saspay_data.get("transaction"):
-                session.saspay_transaction_id = saspay_data["transaction"].get("id")
-            session.raw_response = saspay_data
-            session.save()
-
-            serializer = SasPayCheckoutSessionDetailSerializer(session)
-            return Response(serializer.data)
-
+            process_wave_webhook(raw_body, signature_header, payload)
+            return HttpResponse("Webhook processed successfully", status=status.HTTP_200_OK)
         except ValidationError as e:
-            raise e
+            logger.warning(f"Rejet Webhook Wave: {e}")
+            return HttpResponse(str(e), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            logger.error(f"Error verifying SasPay status for order {number}: {str(e)}")
-            raise ValidationError(
-                {"saspay": "Erreur lors de la vérification du statut de paiement."}
-            )
+            logger.error(f"Erreur interne Webhook Wave: {e}")
+            return HttpResponse("Internal server error", status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class SasPayWebhookView(APIView):
-    """Endpoint pour recevoir les webhooks de SasPay."""
+    """Endpoint Webhook SasPay (POST https://api.votresite.com/api/v1/payments/saspay/webhook/)."""
 
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -148,14 +173,7 @@ class SasPayWebhookView(APIView):
         timestamp = request.headers.get("X-Webhook-Timestamp", "")
         event_type = request.headers.get("X-Webhook-Event", "")
 
-        if not signature or not timestamp or not event_type:
-            logger.warning("Missing required webhook headers")
-            return HttpResponse(
-                "Missing required headers", status=status.HTTP_400_BAD_REQUEST
-            )
-
         raw_body = request.body
-
         try:
             process_saspay_webhook(
                 raw_body=raw_body,
@@ -165,14 +183,7 @@ class SasPayWebhookView(APIView):
                 payload=request.data,
             )
             return HttpResponse("Webhook processed successfully", status=status.HTTP_200_OK)
-
         except ValidationError as e:
-            logger.warning(f"Webhook validation error: {str(e)}")
-            return HttpResponse(
-                str(e), status=status.HTTP_400_BAD_REQUEST
-            )
+            return HttpResponse(str(e), status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            logger.error(f"Webhook processing error: {str(e)}")
-            return HttpResponse(
-                "Internal server error", status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return HttpResponse("Internal server error", status=status.HTTP_500_INTERNAL_SERVER_ERROR)
