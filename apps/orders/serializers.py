@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Order, OrderItem, OrderStatusHistory
+from .models import Invoice, Order, OrderItem, OrderStatusHistory
 
 
 class OrderItemInputSerializer(serializers.Serializer):
@@ -51,12 +51,14 @@ class OrderSerializer(serializers.ModelSerializer):
     history = HistorySerializer(many=True, read_only=True)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     payment_status_label = serializers.CharField(source="get_payment_status_display", read_only=True)
+    payment_method_label = serializers.SerializerMethodField()
     allowed_transitions = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
-            "number", "source", "status", "status_label", "payment_status", "payment_status_label", "payment_method",
+            "number", "source", "status", "status_label", "payment_status", "payment_status_label",
+            "payment_method", "payment_method_label",
             "first_name", "last_name", "email", "phone", "address_line", "city", "delivery_zone_name",
             "customer_note", "subtotal", "delivery_fee", "delivery_fee_pending", "total", "tracking_info",
             "created_at", "items", "history", "allowed_transitions",
@@ -68,29 +70,96 @@ class OrderSerializer(serializers.ModelSerializer):
         allowed = TRANSITIONS.get(obj.status, set())
         return [s for s in STATUS_ORDER if s in allowed]
 
+    def get_payment_method_label(self, obj) -> str:
+        """Retourne un libellé lisible de la méthode de paiement."""
+        labels = {
+            "cash_on_delivery": "Paiement à la livraison",
+            "saspay": "SasPay",
+            "wave": "Wave Sénégal",
+            "orange_money": "Orange Money",
+            "bank_transfer": "Virement bancaire",
+        }
+        return labels.get(obj.payment_method, obj.payment_method or "Non précisée")
+
 
 class OrderListSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     payment_status_label = serializers.CharField(source="get_payment_status_display", read_only=True)
+    payment_method_label = serializers.SerializerMethodField()
     items_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
-        fields = ["number", "status", "status_label", "payment_status", "payment_status_label", "total",
-                  "created_at", "items_count", "first_name", "last_name", "phone"]
+        fields = [
+            "number", "status", "status_label", "payment_status", "payment_status_label",
+            "payment_method", "payment_method_label", "total",
+            "created_at", "items_count", "first_name", "last_name", "phone",
+        ]
 
     def get_items_count(self, obj):
         return sum(i.quantity for i in obj.items.all())
 
+    def get_payment_method_label(self, obj) -> str:
+        labels = {
+            "cash_on_delivery": "Paiement à la livraison",
+            "saspay": "SasPay",
+            "wave": "Wave Sénégal",
+            "orange_money": "Orange Money",
+            "bank_transfer": "Virement bancaire",
+        }
+        return labels.get(obj.payment_method, obj.payment_method or "Non précisée")
+
 
 class AdminOrderUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Order.Status.choices, required=False)
-    # L'interface admin ne propose que "Marquer comme payée". Les autres transitions (remboursement…)
-    # passeront par une future interface dédiée. On accepte "paid" uniquement pour éviter les erreurs.
     payment_status = serializers.ChoiceField(
-        choices=[(Order.PaymentStatus.PAID, Order.PaymentStatus.PAID.label)],
+        choices=[
+            (Order.PaymentStatus.PAID, Order.PaymentStatus.PAID.label),
+            (Order.PaymentStatus.REFUNDED, Order.PaymentStatus.REFUNDED.label),
+        ],
         required=False,
     )
     tracking_info = serializers.CharField(max_length=255, required=False, allow_blank=True)
     delivery_fee = serializers.IntegerField(min_value=0, required=False)
     note = serializers.CharField(max_length=255, required=False, allow_blank=True)
+
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    """Serializer facture — lecture uniquement.
+
+    Expose les données immuables du snapshot + le statut de paiement actuel
+    (mis à jour à chaque changement de payment_status sur la commande).
+    """
+
+    order_number = serializers.CharField(source="order.number", read_only=True)
+    order_status = serializers.CharField(source="order.status", read_only=True)
+    payment_status = serializers.CharField(source="order.payment_status", read_only=True)
+    payment_status_label = serializers.CharField(
+        source="order.get_payment_status_display", read_only=True
+    )
+    payment_method = serializers.CharField(source="order.payment_method", read_only=True)
+    payment_method_label = serializers.SerializerMethodField()
+    is_paid = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Invoice
+        fields = [
+            "number", "order_number", "order_status", "issued_at",
+            "payment_status", "payment_status_label",
+            "payment_method", "payment_method_label",
+            "is_paid", "snapshot",
+        ]
+        read_only_fields = fields
+
+    def get_payment_method_label(self, obj) -> str:
+        labels = {
+            "cash_on_delivery": "Paiement à la livraison",
+            "saspay": "SasPay",
+            "wave": "Wave Sénégal",
+            "orange_money": "Orange Money",
+            "bank_transfer": "Virement bancaire",
+        }
+        return labels.get(obj.order.payment_method, obj.order.payment_method or "Non précisée")
+
+    def get_is_paid(self, obj) -> bool:
+        return obj.order.payment_status == Order.PaymentStatus.PAID

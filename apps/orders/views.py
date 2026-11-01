@@ -19,6 +19,7 @@ from .serializers import (
     OrderCreateSerializer, OrderListSerializer, OrderSerializer,
 )
 from .services import change_status, create_order
+from .signals import ensure_invoice_exists
 
 
 class OrderViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -55,14 +56,10 @@ class OrderViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.Retrie
 
         Retourne la facture de la commande.
         - Le client n'accède qu'à ses propres factures (isolation garantie par get_object()).
-        - Si la facture n'existe pas encore (commande très récente), retourne 404.
+        - Si la facture n'existe pas encore, elle est créée automatiquement.
         """
         order = self.get_object()
-        try:
-            inv = order.invoice
-        except order.__class__.invoice.RelatedObjectDoesNotExist:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Facture non encore disponible. Réessayez dans quelques secondes.")
+        inv = ensure_invoice_exists(order)
         return Response(InvoiceSerializer(inv).data)
 
     @action(detail=True, methods=["get"], url_path="invoice/download")
@@ -72,16 +69,16 @@ class OrderViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.Retrie
         Télécharge la facture PDF de la commande.
         """
         order = self.get_object()
-        try:
-            inv = order.invoice
-        except order.__class__.invoice.RelatedObjectDoesNotExist:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Facture non encore disponible.")
+        inv = ensure_invoice_exists(order)
 
         pdf_buffer = generate_invoice_pdf(order)
-        response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
-        response['Content-Disposition'] = f'attachment; filename="Facture_{inv.number}.pdf"'
+        response = HttpResponse(pdf_buffer.read(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="Facture_{inv.number}.pdf"'
         return response
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, number=None):
+        """Annule une commande client si elle est encore en attente."""
         order = self.get_object()
         if order.status != Order.Status.PENDING:
             raise ValidationError({"status": "Seule une commande en attente peut etre annulee. Contactez la boutique."})
@@ -107,11 +104,7 @@ class AdminOrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     def invoice(self, request, number=None):
         """GET /api/v1/admin/orders/{number}/invoice/ — Facture côté admin."""
         order = self.get_object()
-        try:
-            inv = order.invoice
-        except order.__class__.invoice.RelatedObjectDoesNotExist:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Facture non encore disponible.")
+        inv = ensure_invoice_exists(order)
         return Response(InvoiceSerializer(inv).data)
 
     @action(detail=True, methods=["patch"], url_path="update")
