@@ -87,7 +87,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # PostgreSQL est l'unique base de données supportée (développement et production).
-DEFAULT_DATABASE_URL = "postgresql://neondb_owner:npg_H8OLGuchwr3P@ep-sparkling-sunset-b4b4dnp4-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+DEFAULT_DATABASE_URL = "postgresql://khaliqa_db_user:Z0OSMzdrJc8hHRJ77Gg3UimbtOsNJgOm@dpg-dbjrpd7f3r2c73cvb3k0-a/khaliqa_db"
 
 DATABASES = {
     "default": dj_database_url.config(
