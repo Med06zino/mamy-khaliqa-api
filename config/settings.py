@@ -87,13 +87,27 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # PostgreSQL est l'unique base de données supportée (développement et production).
-DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mamy_khaliqa"
+# DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mamy_khaliqa"
+
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         default=DEFAULT_DATABASE_URL,
+#         conn_max_age=600,
+#         conn_health_checks=True,
+#     )
+# }
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL est introuvable.")
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=DEFAULT_DATABASE_URL,
+        default=DATABASE_URL,
         conn_max_age=600,
         conn_health_checks=True,
+        ssl_require=True,
     )
 }
 
